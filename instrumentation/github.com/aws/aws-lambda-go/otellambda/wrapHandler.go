@@ -33,8 +33,8 @@ var _ lambda.Handler = wrappedHandler{}
 
 // Invoke adds OTel span surrounding customer Handler invocation.
 func (h wrappedHandler) Invoke(ctx context.Context, payload []byte) ([]byte, error) {
-	ctx, span := h.instrumentor.tracingBegin(ctx, payload)
-	defer h.instrumentor.tracingEnd(ctx, span)
+	ctx, span, sqsSpan := h.instrumentor.tracingBegin(ctx, payload)
+	defer h.instrumentor.tracingEnd(ctx, span, sqsSpan)
 
 	response, err := h.handler.Invoke(ctx, payload)
 	if err != nil {

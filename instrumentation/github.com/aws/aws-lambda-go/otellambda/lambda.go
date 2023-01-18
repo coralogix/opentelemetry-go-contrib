@@ -20,6 +20,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambdacontext"
 
 	"go.opentelemetry.io/otel"
@@ -30,6 +31,10 @@ import (
 
 const (
 	tracerName = "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
+
+	headerXForwardedProto = "X-Forwarded-Proto"
+	headerHost            = "Host"
+	headerUserAgent       = "User-Agent"
 )
 
 var errorLogger = log.New(log.Writer(), "OTel Lambda Error: ", 0)
@@ -57,20 +62,27 @@ func newInstrumentor(opts ...Option) instrumentor {
 }
 
 // Logic to start OTel Tracing.
-func (i *instrumentor) tracingBegin(ctx context.Context, eventJSON []byte) (context.Context, trace.Span) {
+func (i *instrumentor) tracingBegin(ctx context.Context, eventJSON []byte, event ...interface{}) (context.Context, trace.Span, trace.Span) {
 	// Add trace id to context
+	errorLogger.Println(string(eventJSON))
 	mc := i.configuration.EventToCarrier(eventJSON)
 	ctx = i.configuration.Propagator.Extract(ctx, mc)
 
-	var span trace.Span
-	spanName := os.Getenv("AWS_LAMBDA_FUNCTION_NAME")
+	var (
+		attributes, sqsAttributes []attribute.KeyValue
 
-	var attributes []attribute.KeyValue
+		span, sqsSpan trace.Span
+		sqsSpanName   string
+		spanName      = os.Getenv("AWS_LAMBDA_FUNCTION_NAME")
+	)
+
 	lc, ok := lambdacontext.FromContext(ctx)
 	if !ok {
 		errorLogger.Println("failed to load lambda context from context, ensure tracing enabled in Lambda")
 	}
 	if lc != nil {
+		errorLogger.Println(lc)
+
 		ctxRequestID := lc.AwsRequestID
 		attributes = append(attributes, semconv.FaaSExecutionKey.String(ctxRequestID))
 
@@ -89,13 +101,35 @@ func (i *instrumentor) tracingBegin(ctx context.Context, eventJSON []byte) (cont
 		attributes = append(attributes, i.resAttrs...)
 	}
 
+	// Check if the event has any of the known types and if so,
+	// instrument according to spec.
+	if event != nil && event[0] != nil {
+		switch e := event[0].(type) {
+		case events.APIGatewayProxyRequest:
+			attributes = append(attributes, semconv.FaaSTriggerHTTP)
+			attributes = append(attributes, attributesFromAPIGatewayProxyRequest(e)...)
+		case events.SQSEvent:
+			attributes = append(attributes, semconv.FaaSTriggerPubsub)
+			sqsSpanName, sqsAttributes = getSQSSpanNameAndAttributes(ctx, e.Records)
+		default:
+		}
+	}
+
 	ctx, span = i.tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(attributes...))
 
-	return ctx, span
+	if sqsSpanName != "" {
+		ctx, sqsSpan = i.tracer.Start(ctx, sqsSpanName, trace.WithSpanKind(trace.SpanKindConsumer), trace.WithAttributes(sqsAttributes...))
+	}
+
+	return ctx, span, sqsSpan
 }
 
 // Logic to wrap up OTel Tracing.
-func (i *instrumentor) tracingEnd(ctx context.Context, span trace.Span) {
+func (i *instrumentor) tracingEnd(ctx context.Context, span trace.Span, sqsSpan trace.Span) {
+	if sqsSpan != nil {
+		sqsSpan.End()
+	}
+
 	span.End()
 
 	// force flush any tracing data since lambda may freeze
@@ -103,4 +137,54 @@ func (i *instrumentor) tracingEnd(ctx context.Context, span trace.Span) {
 	if err != nil {
 		errorLogger.Println("failed to force a flush, lambda may freeze before instrumentation exported: ", err)
 	}
+}
+
+func attributesFromAPIGatewayProxyRequest(e events.APIGatewayProxyRequest) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{}
+
+	if h, ok := e.Headers[headerXForwardedProto]; ok {
+		attrs = append(attrs, semconv.HTTPSchemeKey.String(h))
+	}
+	if h, ok := e.Headers[headerUserAgent]; ok {
+		attrs = append(attrs, semconv.HTTPUserAgentKey.String(h))
+	}
+	if h, ok := e.Headers[headerHost]; ok {
+		attrs = append(attrs, semconv.HTTPHostKey.String(h))
+	}
+	if e.HTTPMethod != "" {
+		attrs = append(attrs, semconv.HTTPMethodKey.String(e.HTTPMethod))
+	}
+	if e.Resource != "" {
+		attrs = append(attrs, semconv.HTTPRouteKey.String(e.Resource))
+	}
+	if e.Path != "" {
+		attrs = append(attrs, semconv.HTTPTargetKey.String(e.Path))
+	}
+
+	return attrs
+}
+
+func getSQSSpanNameAndAttributes(ctx context.Context, m []events.SQSMessage) (string, []attribute.KeyValue) {
+	sqsAttributes := []attribute.KeyValue{
+		semconv.FaaSTriggerPubsub,
+		semconv.MessagingSystemKey.String("AmazonSQS"),
+		semconv.MessagingOperationProcess,
+	}
+
+	var source, sqsSpanName string
+	for _, r := range m {
+		if source != "" {
+			if source != r.EventSource {
+				sqsSpanName = "multiple_sources process"
+				break
+			}
+
+			continue
+		}
+
+		sqsSpanName = r.EventSource + " process"
+		source = r.EventSource
+	}
+
+	return sqsSpanName, sqsAttributes
 }
