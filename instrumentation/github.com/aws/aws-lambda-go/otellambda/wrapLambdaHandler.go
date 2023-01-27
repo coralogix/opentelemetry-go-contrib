@@ -21,6 +21,7 @@ import (
 	"reflect"
 
 	"github.com/aws/aws-lambda-go/events"
+	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
 )
 
@@ -154,8 +155,8 @@ func InstrumentHandler(handlerFunc interface{}, options ...Option) interface{} {
 // Adds OTel span surrounding customer handler call.
 func (whf *wrappedHandlerFunction) wrapper(handlerFunc interface{}) func(ctx context.Context, eventJSON []byte, event interface{}, takesContext bool) []reflect.Value {
 	return func(ctx context.Context, eventJSON []byte, event interface{}, takesContext bool) []reflect.Value {
-		ctx, span, sqsSpan := whf.instrumentor.tracingBegin(ctx, eventJSON, event)
-		defer whf.instrumentor.tracingEnd(ctx, span, sqsSpan)
+		ctx, span, eventSpan := whf.instrumentor.tracingBegin(ctx, eventJSON, event)
+		defer whf.instrumentor.tracingEnd(ctx, span, eventSpan)
 
 		handler := reflect.ValueOf(handlerFunc)
 		var args []reflect.Value
@@ -168,9 +169,14 @@ func (whf *wrappedHandlerFunction) wrapper(handlerFunc interface{}) func(ctx con
 
 		response := handler.Call(args)
 
-		switch r := response[0].Interface().(type) {
-		case events.APIGatewayProxyResponse:
-			span.SetAttributes(semconv.HTTPStatusCodeKey.Int(r.StatusCode))
+		if eventSpan != nil {
+			switch r := response[0].Interface().(type) {
+			case events.APIGatewayProxyResponse:
+				eventSpan.SetAttributes(
+					semconv.HTTPStatusCodeKey.Int(r.StatusCode),
+					attribute.String(httpResponseBodyAttributeKey, r.Body),
+				)
+			}
 		}
 
 		return response
