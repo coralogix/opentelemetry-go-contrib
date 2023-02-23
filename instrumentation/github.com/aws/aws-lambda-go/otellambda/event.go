@@ -47,6 +47,26 @@ func spanNameAndAttributesFromEvent(event []interface{}, lambdaAttr []attribute.
 			lambdaAttr = append(lambdaAttr, semconv.FaaSTriggerPubsub)
 			eventSpanKind = trace.SpanKindConsumer
 			eventSpanName, eventAttributes = sqsEventSpanNameAndAttributes(e.Records)
+		case events.S3Event:
+			lambdaAttr = append(lambdaAttr, semconv.FaaSTriggerDatasource)
+			eventSpanKind = trace.SpanKindConsumer
+			eventSpanName, eventAttributes = s3EventSpanNameAndAttributes(e.Records)
+		case events.DynamoDBEvent:
+			lambdaAttr = append(lambdaAttr, semconv.FaaSTriggerDatasource)
+			eventSpanKind = trace.SpanKindConsumer
+			eventSpanName, eventAttributes = dynamoDBEventSpanNameAndAttributes(e.Records)
+		case events.CognitoEvent:
+			lambdaAttr = append(lambdaAttr, semconv.FaaSTriggerDatasource)
+			eventSpanKind = trace.SpanKindConsumer
+			eventSpanName, eventAttributes = cognitoEventSpanNameAndAttributes(e)
+		case events.SNSEvent:
+			lambdaAttr = append(lambdaAttr, semconv.FaaSTriggerPubsub)
+			eventSpanKind = trace.SpanKindConsumer
+			eventSpanName, eventAttributes = snsEventSpanNameAndAttributes(e.Records)
+		case events.SimpleEmailEvent:
+			lambdaAttr = append(lambdaAttr, semconv.FaaSTriggerPubsub)
+			eventSpanKind = trace.SpanKindConsumer
+			eventSpanName, eventAttributes = simpleEmailEventSpanNameAndAttributes(e.Records)
 		default:
 		}
 	}
@@ -105,4 +125,122 @@ func sqsEventSpanNameAndAttributes(m []events.SQSMessage) (string, []attribute.K
 	}
 
 	return sqsSpanName, eventAttributes
+}
+
+func simpleEmailEventSpanNameAndAttributes(m []events.SimpleEmailRecord) (string, []attribute.KeyValue) {
+	eventAttributes := []attribute.KeyValue{
+		semconv.FaaSTriggerPubsub,
+		semconv.MessagingSystemKey.String("AmazonSES"),
+		semconv.MessagingOperationProcess,
+	}
+
+	var source, sesSpanName string
+	for _, r := range m {
+		if source != "" {
+			if source != r.EventSource {
+				sesSpanName = "multiple_sources process"
+				break
+			}
+
+			continue
+		}
+
+		sesSpanName = r.EventSource + " process"
+		source = r.EventSource
+	}
+
+	return sesSpanName, eventAttributes
+}
+
+func snsEventSpanNameAndAttributes(m []events.SNSEventRecord) (string, []attribute.KeyValue) {
+	eventAttributes := []attribute.KeyValue{
+		semconv.FaaSTriggerPubsub,
+		semconv.MessagingSystemKey.String("AmazonSNS"),
+		semconv.MessagingOperationProcess,
+	}
+
+	var source, snsSpanName string
+	for _, r := range m {
+		if source != "" {
+			if source != r.EventSource {
+				snsSpanName = "multiple_sources process"
+				break
+			}
+
+			continue
+		}
+
+		snsSpanName = r.EventSource + " process"
+		source = r.EventSource
+	}
+
+	return snsSpanName, eventAttributes
+}
+
+func s3EventSpanNameAndAttributes(m []events.S3EventRecord) (string, []attribute.KeyValue) {
+	eventAttributes := []attribute.KeyValue{
+		semconv.FaaSTriggerDatasource,
+	}
+
+	var source, s3SpanName string
+	for _, r := range m {
+		if source != "" {
+			if source != r.EventSource {
+				s3SpanName = "multiple_sources process"
+				break
+			}
+
+			continue
+		}
+
+		s3SpanName = r.EventSource + " process"
+		source = r.EventSource
+	}
+
+	return s3SpanName, eventAttributes
+}
+
+func dynamoDBEventSpanNameAndAttributes(m []events.DynamoDBEventRecord) (string, []attribute.KeyValue) {
+	eventAttributes := []attribute.KeyValue{
+		semconv.FaaSTriggerDatasource,
+		semconv.DBSystemDynamoDB,
+	}
+
+	var source, dynamoDBSpanName, operation string
+	for _, r := range m {
+		if operation != "" {
+			if operation != r.EventName {
+				dynamoDBSpanName = "multiple_operations"
+				break
+			}
+
+			continue
+		}
+
+		if source != "" {
+			if source != r.EventSource {
+				dynamoDBSpanName = "multiple_sources process"
+				break
+			}
+
+			continue
+		}
+
+		dynamoDBSpanName = r.EventSource + " process"
+		source = r.EventSource
+		// For DynamoDB, the operation (INSERT, MODIFY or REMOVE) is the event name.
+		operation = r.EventName
+	}
+
+	eventAttributes = append(eventAttributes, semconv.DBOperationKey.String(operation))
+
+	return dynamoDBSpanName, eventAttributes
+}
+
+func cognitoEventSpanNameAndAttributes(m events.CognitoEvent) (string, []attribute.KeyValue) {
+	eventAttributes := []attribute.KeyValue{
+		semconv.FaaSTriggerDatasource,
+	}
+
+	return m.EventType + " process", eventAttributes
 }
